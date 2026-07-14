@@ -311,11 +311,24 @@ public:
             result.diagnostics.searchDepth = std::max(result.diagnostics.searchDepth, node.depth);
 
             if (node.nextIndex >= static_cast<int>(candidates.size())) {
-                printFinalCandidate(node, candidates, source, remainingPower);
+                std::vector<int> finalSelection = decodeSelection(node.assignment);
+                std::cout << "Final candidate state:" << std::endl;
+                std::cout << "- selected appliances: ";
+                if (finalSelection.empty()) {
+                    std::cout << "none";
+                }
+                for (int index : finalSelection) {
+                    std::cout << candidates[index].name << " ";
+                }
+                std::cout << std::endl;
+                std::cout << "- total power: " << node.load << "W" << std::endl;
+                std::cout << "- g(n): " << node.gCost << std::endl;
+                std::cout << "- h(n): " << node.hCost << std::endl;
+                std::cout << "- f(n): " << node.fCost << std::endl;
+
                 if (node.gCost < bestCost) {
                     bestCost = node.gCost;
-                    bestGoal = node;
-                    haveGoal = true;
+                    bestSelection = finalSelection;
                 }
                 continue;
             }
@@ -400,36 +413,23 @@ public:
     }
 
 private:
-    double decisionCost(const Appliance& device, bool selected, const SourceSnapshot& source, double totalLoad,
-                        double remainingPower, const ModeWeights& weights) const {
-        const double normalizedPower = device.powerWatts / std::max(1.0, source.safePowerLimit());
-        const double predictedSoc = source.predictedBatterySocPercent(totalLoad);
-        const double socPenalty = std::max(0.0, 35.0 - predictedSoc) / 35.0;
-        const double batteryHealthPenalty = (1.0 - source.batteryHealth) * normalizedPower;
-        const double solarUtilization = std::min(device.powerWatts, source.renewableForecastNextHourWatts) /
-                                        std::max(1.0, device.powerWatts);
-        const double gridCost = (!source.gridEconomicallyBeneficial() && totalLoad > source.solarPowerProductionWatts)
-                                    ? (device.powerWatts / 1000.0) * source.gridPricePerKWh
-                                    : 0.0;
-        const double loadBalancePenalty = std::abs(0.70 - (totalLoad / std::max(1.0, source.safePowerLimit())));
-        const double reservePenalty = std::max(0.0, 0.15 - ((remainingPower - totalLoad) / std::max(1.0, source.safePowerLimit())));
-        const double priorityBenefit = static_cast<double>(device.priority) / 100.0;
-        const double usefulnessBenefit = device.usefulnessScore / 10.0;
-        const double preferenceBenefit = device.userPreferenceScore / 10.0;
-        const double startupPenalty = device.startupDelaySeconds / 120.0 + device.startupSurgeWatts / std::max(1.0, source.safePowerLimit());
-
-        const double maximumBenefit = weights.priority + weights.usefulness + weights.preference + (weights.solar * 0.45);
-        const double earnedBenefit = weights.priority * priorityBenefit + weights.usefulness * usefulnessBenefit +
-                                     weights.preference * preferenceBenefit + weights.solar * solarUtilization * 0.45;
-        const double stressCost = weights.energy * normalizedPower + weights.battery * socPenalty +
-                                  weights.health * batteryHealthPenalty + weights.grid * gridCost +
-                                  weights.balance * loadBalancePenalty + weights.reserve * reservePenalty + startupPenalty;
-
-        if (selected) {
-            return std::max(0.0, stressCost + (maximumBenefit - earnedBenefit));
+    double transitionCost(const Appliance& device, int choice, const SourceSnapshot& source) const {
+        if (choice == 0) {
+            return 0.0;
         }
 
-        return std::max(0.0, earnedBenefit + (device.mandatory ? 10.0 : 0.0));
+        double energyUsageCost = (device.powerWatts / std::max(1.0, source.safePowerLimit())) * 0.45;
+        double batteryUsageCost = (device.powerWatts / std::max(1.0, source.maxBatteryDischargePower)) * 0.25;
+        double electricityCost = source.gridAvailable ? (device.powerWatts / 1000.0) * 0.18 : 0.0;
+        double sourceStressCost = sourceStress(device, source) * 0.30;
+
+        double priorityReward = (static_cast<double>(device.priority) / 100.0) * 2.0;
+        double usefulnessReward = (device.usefulnessScore / 10.0) * 2.5;
+        double serviceReward = 0.25;
+        double utilizationReward = (device.powerWatts / std::max(1.0, source.safePowerLimit())) * 0.70;
+
+        return energyUsageCost + batteryUsageCost + electricityCost + sourceStressCost -
+               (priorityReward + usefulnessReward + serviceReward + utilizationReward);
     }
 
     double estimateFutureCost(const SearchNode& node, const std::vector<Appliance>& candidates,
@@ -439,12 +439,24 @@ private:
         double lowerBound = 0.0;
         for (std::size_t i = node.nextIndex; i < candidates.size(); ++i) {
             const Appliance& device = candidates[i];
-            double relaxedOnLoad = node.load + std::min(device.powerWatts, remainingPower);
-            double onCost = decisionCost(device, true, source, relaxedOnLoad, remainingPower, weights);
-            double offCost = decisionCost(device, false, source, node.load, remainingPower, weights);
-            lowerBound += std::min(onCost, offCost);
+            double fitRatio = remainingPower > 0.0 ? std::min(device.powerWatts, remainingPower) / std::max(1.0, remainingPower) : 0.0;
+            double remainingEnergyCost = (device.powerWatts / std::max(1.0, source.safePowerLimit())) * 0.20;
+            double expectedBatteryImpact = (device.powerWatts / std::max(1.0, source.maxBatteryDischargePower)) * 0.12;
+            double expectedSolarRelief = (source.solarPowerProductionWatts / std::max(1.0, source.safePowerLimit())) * 0.08;
+            double futureUsefulnessReward = ((static_cast<double>(device.priority) / 100.0) +
+                                             (device.usefulnessScore / 10.0)) * fitRatio * 0.18;
+            double remainingPenalty = remainingEnergyCost + expectedBatteryImpact - expectedSolarRelief - futureUsefulnessReward;
+            estimate += std::max(0.0, remainingPenalty);
         }
-        return lowerBound;
+        return std::max(0.0, estimate);
+    }
+
+    double sourceStress(const Appliance& device, const SourceSnapshot& source) const {
+        double solarShortfall = std::max(0.0, device.powerWatts - source.solarPowerProductionWatts);
+        double batteryPressure = solarShortfall / std::max(1.0, source.maxBatteryDischargePower);
+        double currentPressure = (device.powerWatts / std::max(1.0, source.systemVoltage)) /
+                                 std::max(1.0, source.currentLimitAmps);
+        return batteryPressure + currentPressure;
     }
 
     void printFinalCandidate(const SearchNode& node, const std::vector<Appliance>& candidates,
@@ -576,11 +588,8 @@ public:
             ConstraintResult constraint = constraintGuard.evaluate(device, source, remainingPower, {}, !device.running);
             if (constraint.feasible) {
                 optionalPool.push_back(device);
-                std::cout << "- " << device.name << " (" << device.powerWatts << " W, surge=" << device.startupSurgeWatts
-                          << " W, priority=" << device.priority << ", usefulness=" << device.usefulnessScore
-                          << ", preference=" << device.userPreferenceScore << ")" << std::endl;
-            } else {
-                std::cout << "- candidate rejected before A*: " << device.name << " because " << constraint.reason << std::endl;
+                std::cout << "- " << device.name << " (" << device.powerWatts << " W, priority="
+                          << device.priority << ", usefulness=" << device.usefulnessScore << ")" << std::endl;
             }
         }
 

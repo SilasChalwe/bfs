@@ -166,19 +166,24 @@ public:
             closed.push_back(node);
 
             if (node.nextIndex >= static_cast<int>(candidates.size())) {
+                std::vector<int> finalSelection = decodeSelection(node.assignment);
+                std::cout << "Final candidate state:" << std::endl;
+                std::cout << "- selected appliances: ";
+                if (finalSelection.empty()) {
+                    std::cout << "none";
+                }
+                for (int index : finalSelection) {
+                    std::cout << candidates[index].name << " ";
+                }
+                std::cout << std::endl;
+                std::cout << "- total power: " << node.load << "W" << std::endl;
+                std::cout << "- g(n): " << node.gCost << std::endl;
+                std::cout << "- h(n): " << node.hCost << std::endl;
+                std::cout << "- f(n): " << node.fCost << std::endl;
+
                 if (node.gCost < bestCost) {
                     bestCost = node.gCost;
-                    bestSelection = decodeSelection(node.assignment);
-                    std::cout << "Final candidate state:" << std::endl;
-                    std::cout << "- selected appliances: ";
-                    for (int index : bestSelection) {
-                        std::cout << candidates[index].name << " ";
-                    }
-                    std::cout << std::endl;
-                    std::cout << "- total power: " << node.load << "W" << std::endl;
-                    std::cout << "- g(n): " << node.gCost << std::endl;
-                    std::cout << "- h(n): " << node.hCost << std::endl;
-                    std::cout << "- f(n): " << node.fCost << std::endl;
+                    bestSelection = finalSelection;
                 }
                 continue;
             }
@@ -231,12 +236,19 @@ private:
         if (choice == 0) {
             return 0.0;
         }
-        double energyPenalty = device.powerWatts / std::max(1.0, source.safePowerLimit());
-        double batteryPenalty = device.powerWatts / std::max(1.0, source.maxBatteryDischargePower);
-        double priorityReward = device.priority / 100.0;
-        double usefulnessReward = device.usefulnessScore / 8.0;
-        double countReward = 0.15;
-        return energyPenalty + batteryPenalty + 0.01 - (priorityReward + usefulnessReward + countReward);
+
+        double energyUsageCost = (device.powerWatts / std::max(1.0, source.safePowerLimit())) * 0.45;
+        double batteryUsageCost = (device.powerWatts / std::max(1.0, source.maxBatteryDischargePower)) * 0.25;
+        double electricityCost = source.gridAvailable ? (device.powerWatts / 1000.0) * 0.18 : 0.0;
+        double sourceStressCost = sourceStress(device, source) * 0.30;
+
+        double priorityReward = (static_cast<double>(device.priority) / 100.0) * 2.0;
+        double usefulnessReward = (device.usefulnessScore / 10.0) * 2.5;
+        double serviceReward = 0.25;
+        double utilizationReward = (device.powerWatts / std::max(1.0, source.safePowerLimit())) * 0.70;
+
+        return energyUsageCost + batteryUsageCost + electricityCost + sourceStressCost -
+               (priorityReward + usefulnessReward + serviceReward + utilizationReward);
     }
 
     double estimateFutureCost(const SearchNode& node, const std::vector<Appliance>& candidates,
@@ -244,14 +256,24 @@ private:
         double estimate = 0.0;
         for (std::size_t i = node.nextIndex; i < candidates.size(); ++i) {
             const Appliance& device = candidates[i];
-            double powerRatio = device.powerWatts / std::max(1.0, source.safePowerLimit());
-            double batteryRatio = device.powerWatts / std::max(1.0, source.maxBatteryDischargePower);
-            double priorityReward = device.priority / 100.0;
-            double usefulnessReward = device.usefulnessScore / 8.0;
-            double budgetPenalty = remainingPower > 0.0 ? (device.powerWatts / std::max(1.0, remainingPower)) * 0.04 : 0.0;
-            estimate += std::max(0.0, (powerRatio * 0.25) + (batteryRatio * 0.15) + budgetPenalty - ((priorityReward + usefulnessReward) * 0.6));
+            double fitRatio = remainingPower > 0.0 ? std::min(device.powerWatts, remainingPower) / std::max(1.0, remainingPower) : 0.0;
+            double remainingEnergyCost = (device.powerWatts / std::max(1.0, source.safePowerLimit())) * 0.20;
+            double expectedBatteryImpact = (device.powerWatts / std::max(1.0, source.maxBatteryDischargePower)) * 0.12;
+            double expectedSolarRelief = (source.solarPowerProductionWatts / std::max(1.0, source.safePowerLimit())) * 0.08;
+            double futureUsefulnessReward = ((static_cast<double>(device.priority) / 100.0) +
+                                             (device.usefulnessScore / 10.0)) * fitRatio * 0.18;
+            double remainingPenalty = remainingEnergyCost + expectedBatteryImpact - expectedSolarRelief - futureUsefulnessReward;
+            estimate += std::max(0.0, remainingPenalty);
         }
-        return estimate;
+        return std::max(0.0, estimate);
+    }
+
+    double sourceStress(const Appliance& device, const SourceSnapshot& source) const {
+        double solarShortfall = std::max(0.0, device.powerWatts - source.solarPowerProductionWatts);
+        double batteryPressure = solarShortfall / std::max(1.0, source.maxBatteryDischargePower);
+        double currentPressure = (device.powerWatts / std::max(1.0, source.systemVoltage)) /
+                                 std::max(1.0, source.currentLimitAmps);
+        return batteryPressure + currentPressure;
     }
 
     bool isClosed(const std::string& key, const std::vector<SearchNode>& closed) const {
@@ -343,7 +365,8 @@ public:
             }
             if (constraintGuard.canAccept(device, source, remainingPower)) {
                 optionalPool.push_back(device);
-                std::cout << "- " << device.name << " (" << device.powerWatts << " W)" << std::endl;
+                std::cout << "- " << device.name << " (" << device.powerWatts << " W, priority="
+                          << device.priority << ", usefulness=" << device.usefulnessScore << ")" << std::endl;
             }
         }
 

@@ -1,0 +1,528 @@
+Implement ONLY the energy management system described below.
+
+IMPORTANT:
+The optimization algorithm MUST be a real A* search algorithm.
+
+DO NOT replace A* with:
+- greedy search
+- best priority selection
+- priority sorting
+- rule-based selection
+- weighted simple scoring
+- heuristic-only decisions
+- any simplified version of A*
+
+The purpose of this implementation is specifically to test and demonstrate A* for energy management.
+
+Do not redesign the architecture.
+Do not introduce another optimization algorithm.
+Use A* only.
+
+Keep everything in ONE C++ file.
+Use classes and keep components logically separated.
+
+==================================================
+SYSTEM ARCHITECTURE FLOW
+==================================================
+
+The system flow must be exactly:
+
+1. System Measurement
+
+2. Calculate System Power Limit
+
+3. Calculate Current Watt Usage
+
+4. Process User Appliance Requests (ON/OFF)
+
+5. Feasibility Checking
+
+6. Lock Mandatory Appliances
+
+7. Calculate Remaining Power
+
+8. Create A* Search Space
+
+9. Run A* Search
+
+10. Combine Mandatory Loads + A* Result
+
+11. Produce Final Appliance State
+
+
+==================================================
+1. SYSTEM MEASUREMENT
+==================================================
+
+Do not implement sensors.
+
+Use simulated measurements.
+
+The system measurement layer provides:
+
+Solar source:
+- solar voltage
+- solar current
+- solar power production watts
+- solar energy production Wh
+
+
+Battery:
+- battery voltage
+- battery current
+- battery energy remaining Wh
+- maximum battery discharge power
+
+
+Grid (optional):
+- grid availability
+- grid power limit
+
+
+Calculate:
+
+systemPowerLimit
+
+This represents the maximum safe power the whole system can provide.
+
+It must consider:
+- solar production
+- battery capability
+- inverter limitation
+- system wiring limitation
+
+
+Do not confuse:
+
+Power production:
+"What can the sources produce?"
+
+Power limit:
+"What can the system safely provide?"
+
+Current watt usage:
+"What appliances are consuming now?"
+
+These are different values.
+
+
+==================================================
+2. CURRENT WATT USAGE
+==================================================
+
+Create a PowerManager.
+
+Calculate:
+
+currentWattUsage
+
+Formula:
+
+currentWattUsage =
+sum(power of appliances currently ON)
+
+
+This only represents existing consumption.
+
+It must not include future A* decisions.
+
+
+==================================================
+3. APPLIANCE MODEL
+==================================================
+
+Create an Appliance class/struct.
+
+Fields:
+
+id
+
+name
+
+voltage
+
+powerWatts
+
+priority
+
+running
+
+mandatory
+
+
+Meaning:
+
+running:
+The appliance is currently ON.
+
+mandatory:
+The appliance was forced ON/OFF by user request and must not be controlled automatically.
+
+
+==================================================
+4. USER APPLIANCE REQUESTS
+==================================================
+
+The user can request:
+
+A) Turn appliance ON
+
+B) Turn appliance OFF
+
+
+-----------------------------
+A) User requests appliance ON
+-----------------------------
+
+Process:
+
+1. Find appliance.
+
+2. Run feasibility check.
+
+3. If feasible:
+
+    appliance.running = true
+
+    appliance.mandatory = true
+
+
+4. Reserve its power.
+
+5. This appliance MUST NOT enter A*.
+
+The user has already decided this appliance must run.
+
+
+If infeasible:
+
+Reject the request.
+
+Never violate:
+
+- voltage limits
+- current limits
+- power limits
+- battery/source capability
+
+
+-----------------------------
+B) User requests appliance OFF
+-----------------------------
+
+Process:
+
+1. Find appliance.
+
+2. Turn it OFF.
+
+Set:
+
+appliance.running = false
+
+appliance.mandatory = false
+
+
+3. Release its power.
+
+4. User OFF commands override automatic optimization.
+
+
+==================================================
+5. FEASIBILITY CHECKING
+==================================================
+
+Create a separate FeasibilityChecker.
+
+It checks:
+
+- voltage compatibility
+- current limitation
+- available power
+- battery/source capability
+
+
+Feasibility happens BEFORE A*.
+
+
+==================================================
+6. MANDATORY LOADS
+==================================================
+
+Mandatory appliances:
+
+- user requested ON appliances
+- critical loads
+
+
+They are already decided.
+
+They must never be included in A*.
+
+
+==================================================
+7. REMAINING POWER
+==================================================
+
+Calculate:
+
+remainingPower =
+
+systemPowerLimit - currentWattUsage
+
+
+After mandatory appliances are added:
+
+recalculate:
+
+currentWattUsage
+
+remainingPower
+
+
+==================================================
+8. A* SEARCH SPACE
+==================================================
+
+Only send these appliances into A*:
+
+- not already running
+- not mandatory
+- passed feasibility checks
+
+
+Example:
+
+Running:
+Fridge
+
+Mandatory:
+Pump
+
+A* receives:
+
+Lights
+TV
+Fan
+
+
+==================================================
+9. REAL A* IMPLEMENTATION
+==================================================
+
+Implement textbook A*.
+
+A* MUST contain:
+
+
+Node/State:
+
+Each node represents a complete ON/OFF combination of optional appliances.
+
+
+Example:
+
+State:
+
+Light = ON
+
+TV = OFF
+
+Fan = ON
+
+
+Each node contains:
+
+- appliance state combination
+- selected appliances
+- total power usage
+- g(n)
+- h(n)
+- f(n)
+
+
+Formula:
+
+f(n) = g(n) + h(n)
+
+
+--------------------------------------------------
+
+OPEN LIST:
+
+Implement an OPEN priority queue.
+
+The queue must always select the node with the lowest f(n).
+
+
+--------------------------------------------------
+
+CLOSED LIST:
+
+Maintain visited states.
+
+Do not expand duplicate states.
+
+
+--------------------------------------------------
+
+NODE EXPANSION:
+
+For every optional appliance:
+
+Generate:
+
+1. Appliance OFF state
+
+2. Appliance ON state
+
+
+Example:
+
+Current:
+
+TV OFF
+
+Children:
+
+TV OFF
+
+TV ON
+
+
+--------------------------------------------------
+
+CONSTRAINT CHECKING:
+
+During expansion reject states that violate:
+
+- power limit
+- current limit
+- voltage limits
+- battery constraints
+
+
+--------------------------------------------------
+
+COST FUNCTION:
+
+g(n) must represent the cost already spent.
+
+Include:
+
+- energy consumption
+- battery usage
+- electricity cost
+
+
+--------------------------------------------------
+
+HEURISTIC:
+
+h(n) must estimate future cost.
+
+Include:
+
+- future energy consumption
+- solar availability
+- battery impact
+- user preference cost
+
+
+The final selected appliance combination MUST come from A* search.
+
+Do not manually select appliances.
+
+
+==================================================
+10. FINAL COMBINATION
+==================================================
+
+After A* finishes:
+
+Combine:
+
+Mandatory appliances
+
++
+
+A* selected appliances
+
+
+The final result is the actual ON/OFF schedule.
+
+
+==================================================
+11. DEBUG OUTPUT
+==================================================
+
+Print:
+
+
+1. INITIAL SYSTEM STATE
+
+Show:
+
+- all appliances
+- power watts
+- running state
+- mandatory state
+
+
+2. SYSTEM MEASUREMENTS
+
+Show:
+
+- solar production
+- battery state
+- system power limit
+
+
+3. CURRENT USAGE
+
+Show:
+
+- current watt usage
+- remaining power
+
+
+4. USER REQUEST PROCESSING
+
+Show:
+
+- ON accepted/rejected
+- OFF actions
+
+
+5. A* INPUT
+
+Show:
+
+all appliances sent to A*
+
+
+6. A* RESULT
+
+Show:
+
+selected appliances
+
+
+7. FINAL SYSTEM STATE
+
+Show:
+
+all appliances that will run
+
+
+==================================================
+
+FINAL REQUIREMENT:
+
+This project exists to implement and test A*.
+
+Use A* only.
+
+Do not replace it with another algorithm.
+Do not simplify it.
+Do not approximate it.

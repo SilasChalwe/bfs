@@ -1,10 +1,10 @@
-#include <cmath>
+#include <algorithm>
 #include <cstddef>
 #include <iostream>
 #include <queue>
-#include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -138,8 +138,10 @@ public:
 
         std::priority_queue<SearchNode, std::vector<SearchNode>, SearchNodeCompare> frontier;
         std::unordered_map<std::string, double> bestSeen;
-        std::vector<SearchNode> closed;
+        std::unordered_set<std::string> closed;
         std::vector<int> bestSelection;
+        SearchNode bestGoal;
+        bool hasBestGoal = false;
         double bestCost = 1e18;
         int evaluatedStateCount = 0;
 
@@ -160,10 +162,18 @@ public:
             frontier.pop();
 
             const std::string key = stateKey(node);
-            if (isClosed(key, closed)) {
+            const auto bestKnown = bestSeen.find(key);
+            if (bestKnown != bestSeen.end() && node.gCost > bestKnown->second) {
                 continue;
             }
-            closed.push_back(node);
+            if (closed.find(key) != closed.end()) {
+                continue;
+            }
+            closed.insert(key);
+
+            if (hasBestGoal && node.fCost >= bestCost) {
+                break;
+            }
 
             if (node.nextIndex >= static_cast<int>(candidates.size())) {
                 std::vector<int> finalSelection = decodeSelection(node.assignment);
@@ -183,6 +193,8 @@ public:
 
                 if (node.gCost < bestCost) {
                     bestCost = node.gCost;
+                    bestGoal = node;
+                    hasBestGoal = true;
                     bestSelection = finalSelection;
                 }
                 continue;
@@ -205,7 +217,7 @@ public:
                     child.load = node.load;
                 }
 
-                child.gCost = node.gCost + transitionCost(device, choice, source);
+                child.gCost = node.gCost + decisionCost(device, choice, source);
                 child.hCost = estimateFutureCost(child, candidates, source, std::max(0.0, remainingPower - child.load));
                 child.fCost = child.gCost + child.hCost;
 
@@ -228,10 +240,19 @@ public:
             }
         }
 
+        std::cout << "- A* expanded states: " << closed.size() << std::endl;
+        std::cout << "- A* evaluated ON decisions: " << evaluatedStateCount << std::endl;
+        if (hasBestGoal) {
+            std::cout << "- best goal cost: " << bestGoal.gCost << std::endl;
+        }
         return bestSelection;
     }
 
 private:
+    double decisionCost(const Appliance& device, int choice, const SourceSnapshot& source) const {
+        return transitionCost(device, choice, source);
+    }
+
     double transitionCost(const Appliance& device, int choice, const SourceSnapshot& source) const {
         if (choice == 0) {
             return 0.0;
@@ -253,19 +274,23 @@ private:
 
     double estimateFutureCost(const SearchNode& node, const std::vector<Appliance>& candidates,
                               const SourceSnapshot& source, double remainingPower) const {
-        double estimate = 0.0;
+        // Admissible lower bound for the remaining decision suffix: assume every still-unassigned appliance
+        // with an individually valid power path can be chosen independently. This relaxation can be more
+        // optimistic than the true constrained suffix because it ignores aggregate capacity conflicts, so it
+        // is safe for optimal A* pruning. It is consistent for independent decisions and intentionally
+        // conservative where aggregate capacity may invalidate a later negative-cost ON decision.
+        double lowerBound = 0.0;
         for (std::size_t i = node.nextIndex; i < candidates.size(); ++i) {
             const Appliance& device = candidates[i];
-            double fitRatio = remainingPower > 0.0 ? std::min(device.powerWatts, remainingPower) / std::max(1.0, remainingPower) : 0.0;
-            double remainingEnergyCost = (device.powerWatts / std::max(1.0, source.safePowerLimit())) * 0.20;
-            double expectedBatteryImpact = (device.powerWatts / std::max(1.0, source.maxBatteryDischargePower)) * 0.12;
-            double expectedSolarRelief = (source.solarPowerProductionWatts / std::max(1.0, source.safePowerLimit())) * 0.08;
-            double futureUsefulnessReward = ((static_cast<double>(device.priority) / 100.0) +
-                                             (device.usefulnessScore / 10.0)) * fitRatio * 0.18;
-            double remainingPenalty = remainingEnergyCost + expectedBatteryImpact - expectedSolarRelief - futureUsefulnessReward;
-            estimate += std::max(0.0, remainingPenalty);
+            const bool individuallyFeasible = device.powerWatts <= remainingPower &&
+                                              device.powerWatts <= source.maxBatteryDischargePower + source.solarPowerProductionWatts &&
+                                              device.voltage <= source.systemVoltage * 1.1 &&
+                                              (device.powerWatts / std::max(1.0, source.systemVoltage)) <= source.currentLimitAmps;
+            if (individuallyFeasible) {
+                lowerBound += std::min(0.0, decisionCost(device, 1, source));
+            }
         }
-        return std::max(0.0, estimate);
+        return lowerBound;
     }
 
     double sourceStress(const Appliance& device, const SourceSnapshot& source) const {
@@ -276,23 +301,15 @@ private:
         return batteryPressure + currentPressure;
     }
 
-    bool isClosed(const std::string& key, const std::vector<SearchNode>& closed) const {
-        for (const SearchNode& seen : closed) {
-            if (stateKey(seen) == key) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     std::string stateKey(const SearchNode& node) const {
-        std::ostringstream stream;
-        stream << node.nextIndex << ":";
-        for (int value : node.assignment) {
-            stream << value << ",";
+        std::string key;
+        key.reserve(static_cast<std::size_t>(node.nextIndex) + 12U);
+        key.append(std::to_string(node.nextIndex));
+        key.push_back(':');
+        for (int i = 0; i < node.nextIndex; ++i) {
+            key.push_back(node.assignment[static_cast<std::size_t>(i)] == 1 ? '1' : '0');
         }
-        stream << "|" << static_cast<int>(std::round(node.load * 100.0));
-        return stream.str();
+        return key;
     }
 
     std::vector<int> decodeSelection(const std::vector<int>& assignment) const {
